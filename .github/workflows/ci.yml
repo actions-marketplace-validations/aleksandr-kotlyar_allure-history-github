@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+  pull-requests: write
+
+jobs:
+  test_gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install test dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run pytest gate
+        run: |
+          set -euo pipefail
+          echo "${GITHUB_RUN_ID}" > jobid
+          pytest -m "not demo"
+
+      - name: Upload allure results
+        uses: actions/upload-artifact@v4
+        with:
+          name: allure-results
+          path: allure-results
+          if-no-files-found: error
+
+      - name: Upload job id
+        uses: actions/upload-artifact@v4
+        with:
+          name: jobid
+          path: jobid
+          if-no-files-found: error
+
+  publish_allure_history:
+    needs: test_gate
+    uses: ./.github/workflows/allure-history.yml
+    with:
+      allure-results-artifact: allure-results
+      job-id-artifact: jobid
+      environment: dev
+      pages-branch: gh-pages
+      reports-to-keep: 30
+      comment-pr: ${{ github.event_name == 'pull_request' }}
+      pull-request-number: ${{ github.event.pull_request.number || '' }}

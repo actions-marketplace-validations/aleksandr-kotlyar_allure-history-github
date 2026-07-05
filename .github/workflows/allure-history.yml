@@ -1,0 +1,294 @@
+name: Reusable Allure History Publisher
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: Report environment folder under public/.
+        required: false
+        type: string
+        default: dev
+      pages-branch:
+        description: Branch used to store generated Pages content and Allure history.
+        required: false
+        type: string
+        default: gh-pages
+      reports-to-keep:
+        description: Number of immutable report snapshots kept per environment and branch.
+        required: false
+        type: number
+        default: 30
+      allure-results-artifact:
+        description: Artifact name containing allure-results/.
+        required: false
+        type: string
+        default: allure-results
+      job-id-artifact:
+        description: Optional artifact name containing a jobid file.
+        required: false
+        type: string
+        default: jobid
+      pages-base-url:
+        description: Optional explicit Pages base URL. When empty, the workflow infers the standard GitHub Pages URL.
+        required: false
+        type: string
+        default: ""
+      comment-pr:
+        description: Post or update a pull request comment with the immutable report URL.
+        required: false
+        type: boolean
+        default: false
+      pull-request-number:
+        description: Pull request number to comment on when comment-pr is enabled.
+        required: false
+        type: string
+        default: ""
+      core-ref:
+        description: Core Allure History release tag or commit.
+        required: false
+        type: string
+        default: main
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+  pull-requests: write
+
+concurrency:
+  group: github-allure-history-pages
+  cancel-in-progress: false
+
+jobs:
+  publish-allure-history:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Checkout Core Allure History
+        uses: actions/checkout@v4
+        with:
+          repository: aleksandr-kotlyar/core-allure-history
+          ref: ${{ inputs.core-ref }}
+          path: .allure-history-core
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Allure CLI
+        run: npm install --global allure-commandline@2.34.1
+
+      - name: Download allure results artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.allure-results-artifact }}
+          path: allure-results
+
+      - name: Download optional job id artifact
+        id: download_jobid
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: ${{ inputs.job-id-artifact }}
+          path: .artifacts/jobid
+
+      - name: Build and publish Allure history
+        env:
+          ENV: ${{ inputs.environment }}
+          PAGES_BRANCH: ${{ inputs.pages-branch }}
+          REPORTS_TO_KEEP: ${{ inputs.reports-to-keep }}
+          PAGES_BASE_URL_INPUT: ${{ inputs.pages-base-url }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          if ! command -v git >/dev/null 2>&1; then
+            echo "Missing git in runner environment."
+            exit 1
+          fi
+
+          if ! command -v python3 >/dev/null 2>&1; then
+            echo "Missing python3 in runner environment."
+            exit 1
+          fi
+
+          if ! command -v allure >/dev/null 2>&1; then
+            echo "Missing allure command in runner environment."
+            exit 1
+          fi
+
+          if [ -z "$(find allure-results -mindepth 1 -print -quit)" ]; then
+            echo "Missing Allure results. A previous job must upload allure-results/ as an artifact."
+            exit 1
+          fi
+
+          if [ -s ".artifacts/jobid/jobid" ]; then
+            JOB_ID="$(cat .artifacts/jobid/jobid)"
+          else
+            JOB_ID="${GITHUB_RUN_ID}"
+          fi
+
+          REPORT_DIR="job_${JOB_ID}"
+          REPORT_ENV="${ENV:-dev}"
+          REPORT_BRANCH="$(python3 .allure-history-core/allure_history.py slug \
+            "${GITHUB_HEAD_REF:-${GITHUB_REF_NAME}}")"
+
+          if [ -n "${PAGES_BASE_URL_INPUT:-}" ]; then
+            PAGES_BASE_URL="${PAGES_BASE_URL_INPUT%/}"
+          else
+            PAGES_BASE_URL="https://${GITHUB_REPOSITORY_OWNER}.github.io/${GITHUB_EVENT_REPOSITORY_NAME}"
+          fi
+
+          export JOB_ID REPORT_DIR REPORT_ENV REPORT_BRANCH PAGES_BASE_URL
+
+          PAGES_BRANCH_STATUS=0
+          git ls-remote --exit-code --heads origin "refs/heads/${PAGES_BRANCH}" >/dev/null 2>&1 || PAGES_BRANCH_STATUS=$?
+
+          if [ "${PAGES_BRANCH_STATUS}" -eq 0 ]; then
+            git clone --single-branch --branch "${PAGES_BRANCH}" \
+              "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
+              pages-worktree
+          elif [ "${PAGES_BRANCH_STATUS}" -eq 2 ]; then
+            echo "Storage branch '${PAGES_BRANCH}' does not exist; creating it."
+            git init pages-worktree
+            git -C pages-worktree remote add origin \
+              "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+            git -C pages-worktree checkout --orphan "${PAGES_BRANCH}"
+          else
+            echo "Failed to check storage branch '${PAGES_BRANCH}'. Verify repository access."
+            exit 1
+          fi
+
+          MODIFIED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+          python3 .allure-history-core/allure_history.py build-report \
+            --results-dir allure-results \
+            --public-dir pages-worktree/public \
+            --environment "${REPORT_ENV}" \
+            --branch "${REPORT_BRANCH}" \
+            --report-id "${JOB_ID}" \
+            --pages-base-url "${PAGES_BASE_URL}" \
+            --ci-name "GitHub Actions" \
+            --ci-type github \
+            --build-url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            --build-name "GitHub Actions Run ${JOB_ID}" \
+            --modified-at "${MODIFIED_AT}" \
+            --reports-to-keep "${REPORTS_TO_KEEP}" \
+            --public-title github-allure-history \
+            --publisher-title "GitHub Allure History Publisher" \
+            --pages-name "GitHub Pages" \
+            --generator-name github-allure-history \
+            --generator-url "https://github.com/aleksandr-kotlyar/github-allure-history" \
+            --generator-version "${GITHUB_REF_NAME:-unknown}" \
+            --output-file allure-history-output.json
+
+          git -C pages-worktree config user.name "github-actions[bot]"
+          git -C pages-worktree config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git -C pages-worktree add public
+
+          if git -C pages-worktree diff --cached --quiet; then
+            echo "No Pages changes to publish."
+          else
+            git -C pages-worktree commit -m "Publish Allure report for run ${GITHUB_RUN_ID}"
+
+            PAGES_PUSH_ATTEMPT=1
+            PAGES_PUSH_MAX_ATTEMPTS=3
+
+            while [ "${PAGES_PUSH_ATTEMPT}" -le "${PAGES_PUSH_MAX_ATTEMPTS}" ]; do
+              REMOTE_BRANCH_STATUS=0
+              git -C pages-worktree ls-remote --exit-code --heads origin "refs/heads/${PAGES_BRANCH}" >/dev/null 2>&1 || REMOTE_BRANCH_STATUS=$?
+
+              if [ "${REMOTE_BRANCH_STATUS}" -eq 0 ]; then
+                git -C pages-worktree pull --rebase origin "${PAGES_BRANCH}"
+              elif [ "${REMOTE_BRANCH_STATUS}" -ne 2 ]; then
+                echo "Failed to check remote storage branch '${PAGES_BRANCH}'."
+                exit 1
+              fi
+
+              if git -C pages-worktree push origin "HEAD:${PAGES_BRANCH}"; then
+                break
+              fi
+
+              if [ "${PAGES_PUSH_ATTEMPT}" -eq "${PAGES_PUSH_MAX_ATTEMPTS}" ]; then
+                echo "Failed to push Pages content after ${PAGES_PUSH_MAX_ATTEMPTS} attempts."
+                exit 1
+              fi
+
+              echo "Pages push attempt ${PAGES_PUSH_ATTEMPT}/${PAGES_PUSH_MAX_ATTEMPTS} failed; retrying after rebase."
+              PAGES_PUSH_ATTEMPT=$((PAGES_PUSH_ATTEMPT + 1))
+              sleep 2
+            done
+          fi
+
+          rm -rf public
+          cp -r pages-worktree/public public
+
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload GitHub Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: public
+
+      - name: Deploy GitHub Pages
+        id: deploy
+        uses: actions/deploy-pages@v4
+
+      - name: Comment on pull request
+        if: ${{ inputs.comment-pr && inputs.pull-request-number != '' }}
+        uses: actions/github-script@v7
+        env:
+          REPORT_ENV: ${{ inputs.environment }}
+        with:
+          script: |
+            const fs = require("fs");
+            const output = JSON.parse(fs.readFileSync("allure-history-output.json", "utf8"));
+            const reportUrl = output.report_url;
+            const marker = "<!-- github-allure-history-report -->";
+            const body = `${marker}\nAllure report: ${reportUrl}`;
+            const issue_number = Number("${{ inputs.pull-request-number }}");
+            const { owner, repo } = context.repo;
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner,
+              repo,
+              issue_number,
+              per_page: 100,
+            });
+            const existing = comments.find((comment) => comment.body && comment.body.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner,
+                repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner,
+                repo,
+                issue_number,
+                body,
+              });
+            }
