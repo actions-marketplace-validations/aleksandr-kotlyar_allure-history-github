@@ -34,6 +34,8 @@ def test_reusable_workflow_composes_its_own_action_and_pages():
     assert "uses: actions/configure-pages@v6" in workflow
     assert "uses: actions/upload-pages-artifact@v5" in workflow
     assert "uses: actions/deploy-pages@v5" in workflow
+    assert "name: github-pages-${{ github.run_attempt }}" in workflow
+    assert "artifact_name: github-pages-${{ github.run_attempt }}" in workflow
     assert "path: ${{ steps.report.outputs.public-dir }}" in workflow
     assert "core-ref:" not in workflow
     assert "git clone" not in workflow
@@ -51,6 +53,9 @@ def test_project_ci_dogfoods_local_action_and_reusable_workflow():
     assert "uses: $/" in workflow
     assert "uses: ./.github/workflows/allure-history.yml" in workflow
     assert "needs: [test_gate, action_smoke]" in workflow
-    assert "if: github.event_name != 'pull_request'" in workflow
+    assert "github.event_name != 'pull_request' ||" in workflow
+    assert "github.event.pull_request.head.repo.full_name == github.repository" in workflow
+    assert "comment-pr: ${{ github.event_name == 'pull_request' }}" in workflow
+    assert "pull-request-number: ${{ github.event.pull_request.number || '' }}" in workflow
     assert "name: allure-results" in workflow
     assert "name: jobid" in workflow
