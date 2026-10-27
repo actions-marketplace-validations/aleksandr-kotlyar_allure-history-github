@@ -16,11 +16,14 @@ inputs:
   environment:
     description: Report environment folder under public/.
     default: dev
+  group-path:
+    description: Relative report group; empty uses environment/branch. Pass a path built with GitHub expressions.
+    default: ''
   pages-branch:
     description: Branch storing generated Pages content and history.
     default: gh-pages
   reports-to-keep:
-    description: Report snapshots retained per environment and branch.
+    description: Report snapshots retained per report group.
     default: '30'
   job-id:
     description: Snapshot ID; defaults to the downloaded jobid artifact or GITHUB_RUN_ID.
@@ -43,7 +46,9 @@ outputs:
 
 runs:
   using: docker
-  image: docker://ghcr.io/aleksandr-kotlyar/allure-history-core:2026.4.1@sha256:8a2c245cfcf01b979876ab427a5d5694fd2aabd4d97b6f5c57b423c1d47b3050
+  # Custom report groups require the Core feature runtime until its next release.
+  # Tested Core commit 9c593a58c346ec7602439c21f17c51799213a872.
+  image: docker://ghcr.io/aleksandr-kotlyar/allure-history-core@sha256:7cf49290044a531ad4079daa5dd90b71dfc8e318dd43cfd812760087248fff43
   args:
     - /usr/local/bin/allure-history-github
     - publish-job
@@ -52,6 +57,7 @@ runs:
     ALLURE_HISTORY_RESULTS_DIR: ${{ inputs.results-dir }}
     ALLURE_HISTORY_JOB_ID: ${{ inputs.job-id }}
     ENV: ${{ inputs.environment }}
+    ALLURE_HISTORY_GROUP_PATH: ${{ inputs.group-path }}
     PAGES_BRANCH: ${{ inputs.pages-branch }}
     REPORTS_TO_KEEP: ${{ inputs.reports-to-keep }}
     PAGES_BASE_URL_INPUT: ${{ inputs.pages-base-url }}

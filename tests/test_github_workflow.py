@@ -9,13 +9,15 @@ def test_action_runs_pinned_public_core_image():
 
     assert "using: docker" in action
     assert re.search(
-        r"docker://ghcr\.io/aleksandr-kotlyar/allure-history-core:"
-        r"\d{4}\.\d+\.\d+@sha256:[0-9a-f]{64}",
+        r"docker://ghcr\.io/aleksandr-kotlyar/allure-history-core"
+        r"(?::\d{4}\.\d+\.\d+)?@sha256:[0-9a-f]{64}",
         action,
     )
     assert "/usr/local/bin/allure-history-github" in action
     assert "- publish-job" in action
     assert "GITHUB_TOKEN: ${{ inputs.github-token }}" in action
+    assert "  group-path:\n" in action
+    assert "    ALLURE_HISTORY_GROUP_PATH: ${{ inputs.group-path }}" in action
     assert "report-url:" in action
     assert "public-dir:" in action
 
@@ -26,6 +28,8 @@ def test_reusable_workflow_composes_its_own_action_and_pages():
     )
 
     assert "uses: $/" in workflow
+    assert "      group-path:\n" in workflow
+    assert "          group-path: ${{ inputs.group-path }}" in workflow
     assert "uses: actions/download-artifact@v8" in workflow
     assert "uses: actions/configure-pages@v6" in workflow
     assert "uses: actions/upload-pages-artifact@v5" in workflow
